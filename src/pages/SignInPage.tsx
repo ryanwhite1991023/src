@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ShoppingCart, Star, Eye, EyeOff } from 'lucide-react';
+import { ShoppingCart, Eye, EyeOff, ArrowLeft, RefreshCw } from 'lucide-react';
+import { sendOTP, verifyOTP, getOTPStatus, resendOTP } from '../utils/smsApi';
 import { useUser } from '../context/UserContext';
-import { sendOTP } from '../utils/smsApi';
+import { storage } from '../utils/localStorage';
 
 const SignInPage = () => {
   const navigate = useNavigate();
@@ -11,42 +12,20 @@ const SignInPage = () => {
     email: '',
     password: ''
   });
+  const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showOTPVerification, setShowOTPVerification] = useState(false);
   const [otp, setOtp] = useState('');
-  const [sentOTP, setSentOTP] = useState('');
   const [userToLogin, setUserToLogin] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
+  const [otpStatus, setOtpStatus] = useState<{ exists: boolean; expiresIn?: number; attemptsLeft?: number }>({ exists: false });
+  const [resendDisabled, setResendDisabled] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    // Special account check
-    const specialEmail = import.meta.env.VITE_SPECIAL_ACCOUNT_EMAIL || 'aslam@gmail.com';
-    const specialPassword = import.meta.env.VITE_SPECIAL_ACCOUNT_PASSWORD || 'aslam';
-    
-    if (formData.email === specialEmail && formData.password === specialPassword) {
-      const specialUser = {
-        id: 'special-aslam',
-        fullName: 'Aslam Khan',
-        businessName: 'InvenEase Admin',
-        email: specialEmail,
-        phone: '+918016056126',
-        gstNumber: '',
-        businessAddress: import.meta.env.VITE_BUSINESS_ADDRESS || 'N0047, sonarudra, Chakbamongoria, nadanghat, West Bengal, Barddhaman, India, 713513',
-        upiId: 'aslam@paytm',
-        isLoggedIn: true,
-        subscription: {
-          type: 'lifetime' as const,
-          startDate: new Date().toISOString(),
-          endDate: new Date(2099, 11, 31).toISOString(),
-          isActive: true
-        },
-        trialDaysLeft: 0,
-        isSpecialAccount: true
-      };
-      login(specialUser);
-      navigate('/dashboard');
+    if (!formData.email || !formData.password) {
+      alert('Please fill in all fields');
       return;
     }
     
@@ -62,12 +41,20 @@ const SignInPage = () => {
         try {
           const result = await sendOTP(existingUser.phone);
           if (result.success && result.code) {
-            setSentOTP(result.code);
             setUserToLogin(existingUser);
             setShowOTPVerification(true);
-            alert(`OTP sent to ${existingUser.phone}: ${result.code}`); // For demo purposes
+            
+            // Update OTP status
+            const status = getOTPStatus(existingUser.phone);
+            setOtpStatus(status);
+            
+            // Show success message
+            alert(`OTP sent to ${existingUser.phone}. Please check your phone.`);
+            
+            // Start resend countdown
+            startResendCountdown();
           } else {
-            alert('Failed to send OTP. Please try again.');
+            alert(result.message || 'Failed to send OTP. Please try again.');
           }
         } catch (error) {
           alert('Error sending OTP. Please try again.');
@@ -86,13 +73,75 @@ const SignInPage = () => {
     }
   };
 
-  const verifyOTP = () => {
-    if (otp === sentOTP) {
+  const verifyOTPCode = () => {
+    if (!userToLogin?.phone) {
+      alert('Phone number not found');
+      return;
+    }
+
+    if (!otp.trim()) {
+      alert('Please enter the OTP');
+      return;
+    }
+
+    const result = verifyOTP(userToLogin.phone, otp.trim());
+    
+    if (result.success) {
       login(userToLogin);
       navigate('/dashboard');
     } else {
-      alert('Invalid OTP. Please try again.');
+      alert(result.message);
+      
+      // Update OTP status after failed attempt
+      const status = getOTPStatus(userToLogin.phone);
+      setOtpStatus(status);
+      
+      // Clear OTP input
+      setOtp('');
     }
+  };
+
+  const handleResendOTP = async () => {
+    if (!userToLogin?.phone || resendDisabled) return;
+    
+    setResendDisabled(true);
+    setLoading(true);
+    
+    try {
+      const result = await resendOTP(userToLogin.phone);
+      if (result.success) {
+        alert('New OTP sent successfully. Please check your phone.');
+        
+        // Update OTP status
+        const status = getOTPStatus(userToLogin.phone);
+        setOtpStatus(status);
+        
+        // Start resend countdown
+        startResendCountdown();
+      } else {
+        alert(result.message || 'Failed to resend OTP. Please try again.');
+      }
+    } catch (error) {
+      alert('Error resending OTP. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startResendCountdown = () => {
+    setResendCountdown(60); // 60 seconds
+    setResendDisabled(true);
+    
+    const interval = setInterval(() => {
+      setResendCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          setResendDisabled(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -100,6 +149,11 @@ const SignInPage = () => {
       ...formData,
       [e.target.name]: e.target.value
     });
+  };
+
+  const handleOTPChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value.replace(/\D/g, ''); // Only allow digits
+    setOtp(value);
   };
 
   return (
@@ -122,183 +176,152 @@ const SignInPage = () => {
           {showOTPVerification ? (
             <div className="space-y-6">
               <div className="text-center">
+                <button
+                  onClick={() => setShowOTPVerification(false)}
+                  className="flex items-center justify-center mx-auto mb-4 text-gray-600 hover:text-gray-800"
+                >
+                  <ArrowLeft className="w-4 h-4 mr-2" />
+                  Back to Sign In
+                </button>
+                
                 <h2 className="text-xl font-bold text-gray-900 mb-2">Verify Phone Number</h2>
-                <p className="text-gray-600">Enter the 4-digit code sent to {userToLogin?.phone}</p>
+                <p className="text-gray-600 mb-4">Enter the 6-digit code sent to {userToLogin?.phone}</p>
+                
+                {otpStatus.exists && (
+                  <div className="text-sm text-gray-500">
+                    {otpStatus.expiresIn && (
+                      <p>Expires in {otpStatus.expiresIn} minute(s)</p>
+                    )}
+                    {otpStatus.attemptsLeft !== undefined && (
+                      <p>{otpStatus.attemptsLeft} attempt(s) remaining</p>
+                    )}
+                  </div>
+                )}
               </div>
               
               <div>
                 <input
                   type="text"
                   value={otp}
-                  onChange={(e) => setOtp(e.target.value)}
-                  placeholder="Enter 4-digit OTP"
-                  maxLength={4}
+                  onChange={handleOTPChange}
+                  placeholder="Enter 6-digit OTP"
+                  maxLength={6}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-2xl tracking-widest"
                 />
               </div>
               
-              <div className="flex space-x-3">
+              <div className="space-y-3">
                 <button
                   type="button"
-                  onClick={() => setShowOTPVerification(false)}
-                  className="flex-1 px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                  onClick={verifyOTPCode}
+                  disabled={loading || !otp.trim()}
+                  className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Back
+                  {loading ? 'Verifying...' : 'Verify OTP'}
                 </button>
+                
                 <button
                   type="button"
-                  onClick={verifyOTP}
-                  className="flex-1 px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg hover:from-blue-700 hover:to-purple-700"
+                  onClick={handleResendOTP}
+                  disabled={resendDisabled || loading}
+                  className="w-full px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
                 >
-                  Verify & Login
+                  {resendDisabled ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                      Resend in {resendCountdown}s
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      Resend OTP
+                    </>
+                  )}
                 </button>
               </div>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-6">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
+                <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
                   Email Address
                 </label>
                 <input
                   type="email"
+                  id="email"
                   name="email"
                   value={formData.email}
                   onChange={handleChange}
-                  placeholder="Enter your email address"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   required
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter your email"
                 />
               </div>
-
+              
               <div>
-                <div className="flex justify-between items-center mb-2">
-                  <label className="text-sm font-medium text-gray-700">
-                    Password
-                  </label>
-                  <Link to="/forgot-password" className="text-sm text-blue-600 hover:text-blue-500">
-                    Forgot password?
-                  </Link>
-                </div>
+                <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
+                  Password
+                </label>
                 <div className="relative">
                   <input
                     type={showPassword ? 'text' : 'password'}
+                    id="password"
                     name="password"
                     value={formData.password}
                     onChange={handleChange}
-                    placeholder="Enter your password"
-                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent pr-12"
                     required
+                    className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Enter your password"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center"
                   >
-                    {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                    {showPassword ? (
+                      <EyeOff className="h-5 w-5 text-gray-400" />
+                    ) : (
+                      <Eye className="h-5 w-5 text-gray-400" />
+                    )}
                   </button>
                 </div>
               </div>
-
+              
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 px-6 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 transition-all duration-300"
+                className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {loading ? 'Sending OTP...' : 'Sign In'}
+                {loading ? 'Signing In...' : 'Sign In'}
               </button>
+              
+              <div className="text-center">
+                <p className="text-gray-600">
+                  Don't have an account?{' '}
+                  <Link to="/signup" className="text-blue-600 hover:text-blue-700 font-medium">
+                    Sign up
+                  </Link>
+                </p>
+              </div>
             </form>
           )}
-
-          <div className="mt-6 text-center">
-            <p className="text-gray-600">
-              Don't have an account?{' '}
-              <Link to="/signup" className="text-blue-600 hover:text-blue-500 font-medium">
-                Sign up
-              </Link>
-            </p>
-          </div>
-
-          <div className="mt-6 text-xs text-gray-500 text-center">
-            By continuing, you agree to our{' '}
-            <Link to="/terms" className="text-blue-600 hover:text-blue-500">Terms of Service</Link>
-            {' '}and{' '}
-            <Link to="/privacy" className="text-blue-600 hover:text-blue-500">Privacy Policy</Link>
-          </div>
         </div>
       </div>
 
-      {/* Right Side - Info Panel */}
-      <div className="hidden lg:flex lg:flex-1 bg-gradient-to-br from-blue-600 to-purple-600 text-white relative overflow-hidden">
-        <div className="flex flex-col justify-center px-12 relative z-10">
-          <div className="mb-12">
-            <h2 className="text-3xl font-bold mb-4">Transform Your Business Operations</h2>
-            <p className="text-xl opacity-90 mb-8">
-              The most comprehensive point-of-sale and inventory management platform designed for modern businesses of all sizes.
+      {/* Right Side - Image/Illustration */}
+      <div className="hidden lg:block lg:w-1/2 bg-gradient-to-br from-blue-50 via-white to-purple-50">
+        <div className="h-full flex items-center justify-center">
+          <div className="text-center">
+            <div className="w-32 h-32 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-8 shadow-2xl">
+              <ShoppingCart className="w-16 h-16 text-white" />
+            </div>
+            <h2 className="text-3xl font-bold text-gray-900 mb-4">
+              Streamline Your Business
+            </h2>
+            <p className="text-xl text-gray-600 max-w-md">
+              Manage inventory, process sales, and grow your business with our powerful POS system.
             </p>
           </div>
-
-          <div className="space-y-6 mb-12">
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">
-                <ShoppingCart className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="font-semibold">Complete POS System</h3>
-                <p className="text-sm opacity-75">Full-featured point of sale with barcode scanning</p>
-              </div>
-            </div>
-            
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">
-                <Star className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="font-semibold">GST Compliant</h3>
-                <p className="text-sm opacity-75">Automated tax calculations and compliance</p>
-              </div>
-            </div>
-
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">
-                <Star className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="font-semibold">Cloud-Based</h3>
-                <p className="text-sm opacity-75">Access your data anywhere, anytime</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white/10 backdrop-blur-sm p-6 rounded-2xl">
-            <div className="flex items-center space-x-3 mb-4">
-              <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
-                <span className="font-semibold">R</span>
-              </div>
-              <div>
-                <p className="font-semibold">Rajesh Kumar</p>
-                <p className="text-sm opacity-75">Retail Store Owner</p>
-              </div>
-            </div>
-            <p className="text-sm opacity-90 italic">
-              "InvenEase revolutionized our store operations. Sales tracking, inventory management, and GST compliance - everything in one place. Our revenue increased by 40% in just 3 months!"
-            </p>
-          </div>
-        </div>
-        
-        {/* Background decoration */}
-        <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full transform translate-x-32 -translate-y-32"></div>
-        <div className="absolute bottom-0 left-0 w-96 h-96 bg-white/5 rounded-full transform -translate-x-48 translate-y-48"></div>
-      </div>
-
-      {/* Bottom links for mobile */}
-      <div className="fixed bottom-0 left-0 right-0 lg:hidden bg-white border-t border-gray-200 px-6 py-4">
-        <div className="flex justify-center space-x-6 text-sm text-gray-600">
-          <Link to="/about">About</Link>
-          <Link to="/contact">Contact Us</Link>
-          <Link to="/returns">Returns</Link>
-          <Link to="/shipping">Shipping</Link>
-          <Link to="/cookies">Cookies</Link>
         </div>
       </div>
     </div>

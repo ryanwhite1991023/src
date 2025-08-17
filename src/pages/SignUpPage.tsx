@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ShoppingCart, Star } from 'lucide-react';
+import { ShoppingCart, Eye, EyeOff, ArrowLeft, RefreshCw } from 'lucide-react';
+import { sendOTP, verifyOTP, getOTPStatus, resendOTP } from '../utils/smsApi';
 import { useUser } from '../context/UserContext';
-import { sendOTP } from '../utils/smsApi';
 import { storage } from '../utils/localStorage';
 
 const SignUpPage = () => {
@@ -12,82 +12,168 @@ const SignUpPage = () => {
     fullName: '',
     businessName: '',
     email: '',
-    password: '',
-    confirmPassword: '',
     phone: '',
-    gstNumber: '',
-    upiId: ''
+    password: '',
+    confirmPassword: ''
   });
-  const [businessAddress, setBusinessAddress] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [showOTPVerification, setShowOTPVerification] = useState(false);
   const [otp, setOtp] = useState('');
-  const [sentOTP, setSentOTP] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [otpStatus, setOtpStatus] = useState<{ exists: boolean; expiresIn?: number; attemptsLeft?: number }>({ exists: false });
+  const [resendDisabled, setResendDisabled] = useState(false);
+  const [resendCountdown, setResendCountdown] = useState(0);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!formData.fullName || !formData.businessName || !formData.email || !formData.phone || !formData.password || !formData.confirmPassword) {
+      alert('Please fill in all fields');
+      return;
+    }
     
     if (formData.password !== formData.confirmPassword) {
       alert('Passwords do not match');
       return;
     }
-
-    if (formData.phone) {
-      setLoading(true);
-      try {
-        const result = await sendOTP(formData.phone);
-        if (result.success && result.code) {
-          setSentOTP(result.code);
-          setShowOTPVerification(true);
-          alert(`OTP sent to ${formData.phone}: ${result.code}`); // For demo purposes
-        } else {
-          alert('Failed to send OTP. Please check your internet connection and try again.');
-        }
-      } catch (error) {
-        alert('Error sending OTP. Please try again.');
-      } finally {
-        setLoading(false);
+    
+    if (formData.password.length < 6) {
+      alert('Password must be at least 6 characters long');
+      return;
+    }
+    
+    // Check if user already exists
+    const users = storage.getUsersList();
+    const existingUser = users.find((user: any) => user.email === formData.email);
+    
+    if (existingUser) {
+      alert('User with this email already exists. Please sign in instead.');
+      navigate('/signin');
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      const result = await sendOTP(formData.phone);
+      if (result.success && result.code) {
+        setShowOTPVerification(true);
+        
+        // Update OTP status
+        const status = getOTPStatus(formData.phone);
+        setOtpStatus(status);
+        
+        // Show success message
+        alert(`OTP sent to ${formData.phone}. Please check your phone.`);
+        
+        // Start resend countdown
+        startResendCountdown();
+      } else {
+        alert(result.message || 'Failed to send OTP. Please check your internet connection and try again.');
       }
-    } else {
-      createAccount();
+    } catch (error) {
+      alert('Error sending OTP. Please try again.');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const verifyOTP = () => {
-    if (otp === sentOTP) {
-      createAccount();
+  const verifyOTPCode = () => {
+    if (!formData.phone) {
+      alert('Phone number not found');
+      return;
+    }
+
+    if (!otp.trim()) {
+      alert('Please enter the OTP');
+      return;
+    }
+
+    const result = verifyOTP(formData.phone, otp.trim());
+    
+    if (result.success) {
+      // Create new user
+      const newUser = {
+        id: Date.now().toString(),
+        fullName: formData.fullName,
+        businessName: formData.businessName,
+        email: formData.email,
+        phone: formData.phone,
+        gstNumber: '',
+        businessAddress: '',
+        upiId: '',
+        isLoggedIn: true,
+        subscription: {
+          type: 'trial' as const,
+          startDate: new Date().toISOString(),
+          endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          isActive: true
+        },
+        trialDaysLeft: 7,
+        isSpecialAccount: false
+      };
+      
+      // Save user to localStorage
+      const users = storage.getUsersList();
+      users.push(newUser);
+      storage.saveUsersList(users);
+      
+      // Login user
+      login(newUser);
+      navigate('/dashboard');
     } else {
-      alert('Invalid OTP. Please try again.');
+      alert(result.message);
+      
+      // Update OTP status after failed attempt
+      const status = getOTPStatus(formData.phone);
+      setOtpStatus(status);
+      
+      // Clear OTP input
+      setOtp('');
     }
   };
 
-  const createAccount = () => {
-    // Create user account
-    const userData = {
-      id: Date.now().toString(),
-      fullName: formData.fullName,
-      businessName: formData.businessName,
-      email: formData.email,
-      phone: formData.phone,
-      gstNumber: formData.gstNumber,
-      businessAddress: businessAddress || '',
-      upiId: formData.upiId,
-      isLoggedIn: true,
-      registrationDate: new Date().toISOString(),
-      subscription: {
-        type: 'trial' as const,
-        startDate: new Date().toISOString(),
-        endDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        isActive: true
-      },
-      trialDaysLeft: 7
-    };
+  const handleResendOTP = async () => {
+    if (!formData.phone || resendDisabled) return;
+    
+    setResendDisabled(true);
+    setLoading(true);
+    
+    try {
+      const result = await resendOTP(formData.phone);
+      if (result.success) {
+        alert('New OTP sent successfully. Please check your phone.');
+        
+        // Update OTP status
+        const status = getOTPStatus(formData.phone);
+        setOtpStatus(status);
+        
+        // Start resend countdown
+        startResendCountdown();
+      } else {
+        alert(result.message || 'Failed to resend OTP. Please try again.');
+      }
+    } catch (error) {
+      alert('Error resending OTP. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    // Save user to localStorage for future logins
-    storage.saveUser(userData);
-
-    login(userData);
-    navigate('/dashboard');
+  const startResendCountdown = () => {
+    setResendCountdown(60); // 60 seconds
+    setResendDisabled(true);
+    
+    const interval = setInterval(() => {
+      setResendCountdown((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          setResendDisabled(false);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -95,6 +181,11 @@ const SignUpPage = () => {
       ...formData,
       [e.target.name]: e.target.value
     });
+  };
+
+  const handleOTPChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value.replace(/\D/g, ''); // Only allow digits
+    setOtp(value);
   };
 
   return (
@@ -117,260 +208,229 @@ const SignUpPage = () => {
           {showOTPVerification ? (
             <div className="space-y-6">
               <div className="text-center">
+                <button
+                  onClick={() => setShowOTPVerification(false)}
+                  className="flex items-center justify-center mx-auto mb-4 text-gray-600 hover:text-gray-800"
+                >
+                  <ArrowLeft className="w-4 h-4 mr-2" />
+                  Back to Sign Up
+                </button>
+                
                 <h2 className="text-xl font-bold text-gray-900 mb-2">Verify Phone Number</h2>
-                <p className="text-gray-600">Enter the 4-digit code sent to {formData.phone}</p>
+                <p className="text-gray-600 mb-4">Enter the 6-digit code sent to {formData.phone}</p>
+                
+                {otpStatus.exists && (
+                  <div className="text-sm text-gray-500">
+                    {otpStatus.expiresIn && (
+                      <p>Expires in {otpStatus.expiresIn} minute(s)</p>
+                    )}
+                    {otpStatus.attemptsLeft !== undefined && (
+                      <p>{otpStatus.attemptsLeft} attempt(s) remaining</p>
+                    )}
+                  </div>
+                )}
               </div>
               
               <div>
                 <input
                   type="text"
                   value={otp}
-                  onChange={(e) => setOtp(e.target.value)}
-                  placeholder="Enter 4-digit OTP"
-                  maxLength={4}
+                  onChange={handleOTPChange}
+                  placeholder="Enter 6-digit OTP"
+                  maxLength={6}
                   className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-2xl tracking-widest"
                 />
               </div>
               
-              <div className="flex space-x-3">
+              <div className="space-y-3">
                 <button
                   type="button"
-                  onClick={() => setShowOTPVerification(false)}
-                  className="flex-1 px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                  onClick={verifyOTPCode}
+                  disabled={loading || !otp.trim()}
+                  className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Back
+                  {loading ? 'Verifying...' : 'Verify OTP & Create Account'}
                 </button>
+                
                 <button
                   type="button"
-                  onClick={verifyOTP}
-                  className="flex-1 px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg hover:from-blue-700 hover:to-purple-700"
+                  onClick={handleResendOTP}
+                  disabled={resendDisabled || loading}
+                  className="w-full px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
                 >
-                  Verify & Create Account
+                  {resendDisabled ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                      Resend in {resendCountdown}s
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                      Resend OTP
+                    </>
+                  )}
                 </button>
               </div>
             </div>
           ) : (
-            <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Full Name
-              </label>
-              <input
-                type="text"
-                name="fullName"
-                value={formData.fullName}
-                onChange={handleChange}
-                placeholder="Enter your full name"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Business Name
-              </label>
-              <input
-                type="text"
-                name="businessName"
-                value={formData.businessName}
-                onChange={handleChange}
-                placeholder="Enter business name"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Email address
-              </label>
-              <input
-                type="email"
-                name="email"
-                value={formData.email}
-                onChange={handleChange}
-                placeholder="Enter your email"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Password
-              </label>
-              <input
-                type="password"
-                name="password"
-                value={formData.password}
-                onChange={handleChange}
-                placeholder="Create password"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Confirm Password
-              </label>
-              <input
-                type="password"
-                name="confirmPassword"
-                value={formData.confirmPassword}
-                onChange={handleChange}
-                placeholder="Confirm password"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Business Address
-              </label>
-              <input
-                type="text"
-                value={businessAddress}
-                onChange={(e) => setBusinessAddress(e.target.value)}
-                placeholder="Enter business address"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Phone Number (For OTP Verification)
-              </label>
-              <input
-                type="tel"
-                name="phone"
-                value={formData.phone}
-                onChange={handleChange}
-                placeholder="Enter phone number"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                UPI ID (For payments)
-              </label>
-              <input
-                type="text"
-                name="upiId"
-                value={formData.upiId}
-                onChange={handleChange}
-                placeholder="Enter your UPI ID"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                GST Number (Optional)
-              </label>
-              <input
-                type="text"
-                name="gstNumber"
-                value={formData.gstNumber}
-                onChange={handleChange}
-                placeholder="Enter GST number"
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white py-3 px-6 rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 transition-all duration-300"
-            >
-              {loading ? 'Sending OTP...' : 'Create Account'}
-            </button>
-          </form>
+            <form onSubmit={handleSubmit} className="space-y-6">
+              <div>
+                <label htmlFor="fullName" className="block text-sm font-medium text-gray-700 mb-2">
+                  Full Name
+                </label>
+                <input
+                  type="text"
+                  id="fullName"
+                  name="fullName"
+                  value={formData.fullName}
+                  onChange={handleChange}
+                  required
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter your full name"
+                />
+              </div>
+              
+              <div>
+                <label htmlFor="businessName" className="block text-sm font-medium text-gray-700 mb-2">
+                  Business Name
+                </label>
+                <input
+                  type="text"
+                  id="businessName"
+                  name="businessName"
+                  value={formData.businessName}
+                  onChange={handleChange}
+                  required
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter your business name"
+                />
+              </div>
+              
+              <div>
+                <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
+                  Email Address
+                </label>
+                <input
+                  type="email"
+                  id="email"
+                  name="email"
+                  value={formData.email}
+                  onChange={handleChange}
+                  required
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter your email address"
+                />
+              </div>
+              
+              <div>
+                <label htmlFor="phone" className="block text-sm font-medium text-gray-700 mb-2">
+                  Phone Number (For OTP Verification)
+                </label>
+                <input
+                  type="tel"
+                  id="phone"
+                  name="phone"
+                  value={formData.phone}
+                  onChange={handleChange}
+                  required
+                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter your phone number"
+                />
+              </div>
+              
+              <div>
+                <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
+                  Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    id="password"
+                    name="password"
+                    value={formData.password}
+                    onChange={handleChange}
+                    required
+                    className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Create a password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                  >
+                    {showPassword ? (
+                      <EyeOff className="h-5 w-5 text-gray-400" />
+                    ) : (
+                      <Eye className="h-5 w-5 text-gray-400" />
+                    )}
+                  </button>
+                </div>
+              </div>
+              
+              <div>
+                <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 mb-2">
+                  Confirm Password
+                </label>
+                <div className="relative">
+                  <input
+                    type={showConfirmPassword ? 'text' : 'password'}
+                    id="confirmPassword"
+                    name="confirmPassword"
+                    value={formData.confirmPassword}
+                    onChange={handleChange}
+                    required
+                    className="w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Confirm your password"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                  >
+                    {showConfirmPassword ? (
+                      <EyeOff className="h-5 w-5 text-gray-400" />
+                    ) : (
+                      <Eye className="h-5 w-5 text-gray-400" />
+                    )}
+                  </button>
+                </div>
+              </div>
+              
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-lg font-semibold hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {loading ? 'Sending OTP...' : 'Create Account'}
+              </button>
+              
+              <div className="text-center">
+                <p className="text-gray-600">
+                  Already have an account?{' '}
+                  <Link to="/signin" className="text-blue-600 hover:text-blue-700 font-medium">
+                    Sign in
+                  </Link>
+                </p>
+              </div>
+            </form>
           )}
-
-          <div className="mt-6 text-center">
-            <p className="text-gray-600">
-              Already have an account?{' '}
-              <Link to="/signin" className="text-blue-600 hover:text-blue-500 font-medium">
-                Sign in
-              </Link>
-            </p>
-          </div>
-
-          <div className="mt-6 text-xs text-gray-500 text-center">
-            By continuing, you agree to our{' '}
-            <Link to="/terms" className="text-blue-600 hover:text-blue-500">Terms of Service</Link>
-            {' '}and{' '}
-            <Link to="/privacy" className="text-blue-600 hover:text-blue-500">Privacy Policy</Link>
-          </div>
         </div>
       </div>
 
-      {/* Right Side - Info Panel */}
-      <div className="hidden lg:flex lg:flex-1 bg-gradient-to-br from-blue-600 to-purple-600 text-white relative overflow-hidden">
-        <div className="flex flex-col justify-center px-12 relative z-10">
-          <div className="mb-12">
-            <h2 className="text-3xl font-bold mb-4">Transform Your Business Operations</h2>
-            <p className="text-xl opacity-90 mb-8">
-              The most comprehensive point-of-sale and inventory management platform designed for modern businesses of all sizes.
+      {/* Right Side - Image/Illustration */}
+      <div className="hidden lg:block lg:w-1/2 bg-gradient-to-br from-blue-50 via-white to-purple-50">
+        <div className="h-full flex items-center justify-center">
+          <div className="text-center">
+            <div className="w-32 h-32 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center mx-auto mb-8 shadow-2xl">
+              <ShoppingCart className="w-16 h-16 text-white" />
+            </div>
+            <h2 className="text-3xl font-bold text-gray-900 mb-4">
+              Start Your Business Journey
+            </h2>
+            <p className="text-xl text-gray-600 max-w-md">
+              Join thousands of businesses that trust InvenEase for their POS and inventory management needs.
             </p>
           </div>
-
-          <div className="space-y-6 mb-12">
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">
-                <ShoppingCart className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="font-semibold">Complete POS System</h3>
-                <p className="text-sm opacity-75">Full-featured point of sale with barcode scanning</p>
-              </div>
-            </div>
-            
-            <div className="flex items-center space-x-3">
-              <div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">
-                <Star className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="font-semibold">Advanced Analytics</h3>
-                <p className="text-sm opacity-75">Real-time sales tracking and detailed reports</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="bg-white/10 backdrop-blur-sm p-6 rounded-2xl">
-            <div className="flex items-center space-x-3 mb-4">
-              <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
-                <span className="font-semibold">R</span>
-              </div>
-              <div>
-                <p className="font-semibold">Rajesh Kumar</p>
-                <p className="text-sm opacity-75">Retail Store Owner</p>
-              </div>
-            </div>
-            <p className="text-sm opacity-90 italic">
-              "InvenEase revolutionized our store operations. Sales tracking, inventory management, and GST compliance - everything in one place. Our revenue increased by 40% in just 3 months!"
-            </p>
-          </div>
-        </div>
-        
-        {/* Background decoration */}
-        <div className="absolute top-0 right-0 w-64 h-64 bg-white/5 rounded-full transform translate-x-32 -translate-y-32"></div>
-        <div className="absolute bottom-0 left-0 w-96 h-96 bg-white/5 rounded-full transform -translate-x-48 translate-y-48"></div>
-      </div>
-
-      {/* Bottom links for mobile */}
-      <div className="fixed bottom-0 left-0 right-0 lg:hidden bg-white border-t border-gray-200 px-6 py-4">
-        <div className="flex justify-center space-x-6 text-sm text-gray-600">
-          <Link to="/about">About</Link>
-          <Link to="/contact">Contact Us</Link>
-          <Link to="/returns">Returns</Link>
-          <Link to="/shipping">Shipping</Link>
-          <Link to="/cookies">Cookies</Link>
         </div>
       </div>
     </div>

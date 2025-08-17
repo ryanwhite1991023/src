@@ -28,6 +28,12 @@ const SettingsPage = () => {
   const [showOTPInput, setShowOTPInput] = useState(false);
   const [otpCode, setOtpCode] = useState('');
   const [sentOTP, setSentOTP] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [otpStatus, setOtpStatus] = useState({
+    exists: false,
+    expiresIn: undefined,
+    attemptsLeft: undefined
+  });
 
   const tabs = [
     { id: 'profile', label: 'Profile', icon: User },
@@ -120,15 +126,62 @@ const SettingsPage = () => {
     }
   };
 
+  const handleSendOTP = async () => {
+    if (!formData.phone) {
+      alert('Please enter a phone number first');
+      return;
+    }
+    
+    setLoading(true);
+    try {
+      const result = await sendOTP(formData.phone);
+      if (result.success && result.code) {
+        setShowOTPInput(true);
+        
+        // Update OTP status
+        const status = getOTPStatus(formData.phone);
+        setOtpStatus(status);
+        
+        alert('OTP sent successfully. Please check your phone.');
+      } else {
+        alert(result.message || 'Failed to send OTP. Please try again.');
+      }
+    } catch (error) {
+      alert('Error sending OTP. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const verifyOTPFor2FA = () => {
-    if (otpCode === sentOTP) {
-      setTwoFactorEnabled(true);
+    if (!formData.phone) {
+      alert('Phone number not found');
+      return;
+    }
+
+    if (!otpCode.trim()) {
+      alert('Please enter the OTP');
+      return;
+    }
+
+    const result = verifyOTP(formData.phone, otpCode.trim());
+    
+    if (result.success) {
+      // Update user with new phone number
+      updateUser({ phone: formData.phone });
       setShowOTPInput(false);
       setOtpCode('');
       setSentOTP('');
-      alert('2FA enabled successfully! You will receive SMS codes for login.');
+      alert('Phone number updated successfully!');
     } else {
-      alert('Invalid verification code. Please try again.');
+      alert(result.message);
+      
+      // Update OTP status after failed attempt
+      const status = getOTPStatus(formData.phone);
+      setOtpStatus(status);
+      
+      // Clear OTP input
+      setOtpCode('');
     }
   };
 
@@ -419,60 +472,65 @@ const SettingsPage = () => {
                       </p>
                       
                       {showOTPInput ? (
-                        <div className="space-y-4">
+                        <div className="space-y-4 p-4 bg-gray-50 rounded-lg">
+                          <div className="text-center">
+                            <h3 className="text-lg font-semibold text-gray-900 mb-2">Verify Phone Number</h3>
+                            <p className="text-gray-600 mb-4">Enter the 6-digit code sent to {formData.phone}</p>
+                            
+                            {otpStatus.exists && (
+                              <div className="text-sm text-gray-500">
+                                {otpStatus.expiresIn && (
+                                  <p>Expires in {otpStatus.expiresIn} minute(s)</p>
+                                )}
+                                {otpStatus.attemptsLeft !== undefined && (
+                                  <p>{otpStatus.attemptsLeft} attempt(s) remaining</p>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          
                           <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">
-                              Enter verification code sent to {user?.phone}
-                            </label>
                             <input
                               type="text"
                               value={otpCode}
-                              onChange={(e) => setOtpCode(e.target.value)}
-                              placeholder="Enter 4-digit code"
-                              maxLength={4}
-                              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                              onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, ''))}
+                              placeholder="Enter 6-digit OTP"
+                              maxLength={6}
+                              className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-center text-2xl tracking-widest"
                             />
                           </div>
+                          
                           <div className="flex space-x-3">
                             <button
+                              type="button"
                               onClick={() => {
                                 setShowOTPInput(false);
                                 setOtpCode('');
                                 setSentOTP('');
                               }}
-                              className="flex-1 px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
+                              className="flex-1 px-4 py-3 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50"
                             >
                               Cancel
                             </button>
                             <button
+                              type="button"
                               onClick={verifyOTPFor2FA}
-                              className="flex-1 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                              disabled={!otpCode.trim()}
+                              className="flex-1 px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
-                              Verify & Enable 2FA
+                              Verify OTP
                             </button>
                           </div>
                         </div>
                       ) : (
-                        <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-sm font-medium text-gray-900">
-                            Status: {twoFactorEnabled ? 'Enabled' : 'Disabled'}
-                          </p>
-                          {twoFactorEnabled && (
-                            <p className="text-sm text-gray-600">SMS codes will be sent to {user?.phone}</p>
-                          )}
-                        </div>
-                        <button 
-                          onClick={handleTwoFactorToggle}
-                          className={`px-4 py-2 rounded-lg transition-colors ${
-                            twoFactorEnabled 
-                              ? 'bg-red-600 text-white hover:bg-red-700' 
-                              : 'bg-green-600 text-white hover:bg-green-700'
-                          }`}
+                        <button
+                          type="button"
+                          onClick={handleSendOTP}
+                          disabled={loading || !formData.phone}
+                          className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                         >
-                          {twoFactorEnabled ? 'Disable 2FA' : 'Enable 2FA'}
+                          {loading ? 'Sending OTP...' : 'Send OTP'}
                         </button>
-                      </div>
                       )}
                     </div>
 
