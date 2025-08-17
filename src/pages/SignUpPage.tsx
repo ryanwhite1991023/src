@@ -56,7 +56,7 @@ const SignUpPage = () => {
     setLoading(true);
     try {
       const result = await sendOTP(formData.phone);
-      if (result.success && result.code) {
+      if (result.success) {
         setShowOTPVerification(true);
         
         // Update OTP status

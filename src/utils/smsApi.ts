@@ -10,7 +10,6 @@ if (!SMS_API_KEY) {
 export interface SMSResponse {
   success: boolean;
   message: string;
-  code?: string;
   error?: string;
 }
 
@@ -19,6 +18,7 @@ export interface OTPData {
   expiresAt: number;
   attempts: number;
   phoneNumber: string;
+  createdAt: number;
 }
 
 // In-memory OTP storage (replace with database in production)
@@ -29,10 +29,14 @@ const OTP_CONFIG = {
   LENGTH: 6,
   EXPIRY_MINUTES: 5,
   MAX_ATTEMPTS: 3,
-  RESEND_COOLDOWN_MINUTES: 1
+  RESEND_COOLDOWN_MINUTES: 1,
+  MAX_OTPS_PER_HOUR: 5
 };
 
-export const sendOTP = async (phoneNumber: string): Promise<SMSResponse & { code?: string }> => {
+// Rate limiting storage
+const rateLimitStorage = new Map<string, { count: number; resetTime: number }>();
+
+export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
   try {
     // Validate phone number
     if (!isValidPhoneNumber(phoneNumber)) {
@@ -40,6 +44,16 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse & { code
         success: false,
         message: 'Invalid phone number format',
         error: 'INVALID_PHONE'
+      };
+    }
+
+    // Check rate limiting
+    const rateLimit = checkRateLimit(phoneNumber);
+    if (!rateLimit.allowed) {
+      return {
+        success: false,
+        message: `Too many OTP requests. Please wait ${rateLimit.waitTime} minute(s) before trying again.`,
+        error: 'RATE_LIMIT_EXCEEDED'
       };
     }
 
@@ -63,13 +77,15 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse & { code
     // Generate new OTP
     const newOTP = generateOTP();
     const expiresAt = Date.now() + (OTP_CONFIG.EXPIRY_MINUTES * 60 * 1000);
+    const createdAt = Date.now();
     
-    // Store OTP data
+    // Store OTP data (without exposing it)
     otpStorage.set(phoneNumber, {
       code: newOTP,
       expiresAt,
       attempts: 0,
-      phoneNumber
+      phoneNumber,
+      createdAt
     });
 
     // Try to send via SMS API if configured
@@ -93,39 +109,45 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse & { code
               code: otpMatch[1],
               expiresAt,
               attempts: 0,
-              phoneNumber
+              phoneNumber,
+              createdAt
             });
           }
           
+          // Update rate limiting
+          updateRateLimit(phoneNumber);
+          
           return {
             success: true,
-            message: 'OTP sent successfully via SMS',
-            code: newOTP // Return generated OTP for demo/fallback
+            message: 'OTP sent successfully via SMS'
           };
         } else {
-          console.warn('SMS API failed, using generated OTP:', data);
-          // Fallback to generated OTP
+          console.warn('SMS API failed:', data);
+          // Remove stored OTP if SMS failed
+          otpStorage.delete(phoneNumber);
           return {
-            success: true,
-            message: 'OTP generated successfully (SMS delivery failed)',
-            code: newOTP
+            success: false,
+            message: 'Failed to send OTP via SMS. Please try again later.',
+            error: 'SMS_DELIVERY_FAILED'
           };
         }
       } catch (apiError) {
-        console.warn('SMS API error, using generated OTP:', apiError);
-        // Fallback to generated OTP
+        console.warn('SMS API error:', apiError);
+        // Remove stored OTP if API error
+        otpStorage.delete(phoneNumber);
         return {
-          success: true,
-          message: 'OTP generated successfully (SMS delivery failed)',
-          code: newOTP
+          success: false,
+          message: 'Failed to send OTP. Please try again later.',
+          error: 'API_ERROR'
         };
       }
     } else {
-      // No API key configured, use generated OTP
+      // No API key configured
+      otpStorage.delete(phoneNumber);
       return {
-        success: true,
-        message: 'OTP generated successfully (SMS not configured)',
-        code: newOTP
+        success: false,
+        message: 'SMS service not configured. Please contact support.',
+        error: 'SMS_NOT_CONFIGURED'
       };
     }
   } catch (error) {
@@ -199,6 +221,11 @@ export const verifyOTP = (phoneNumber: string, inputOTP: string): SMSResponse =>
 };
 
 export const generateOTP = (): string => {
+  // Use crypto.randomInt for better security if available
+  if (typeof crypto !== 'undefined' && crypto.randomInt) {
+    return crypto.randomInt(100000, 999999).toString();
+  }
+  // Fallback to Math.random (less secure but functional)
   return Math.floor(Math.pow(10, OTP_CONFIG.LENGTH - 1) + Math.random() * Math.pow(10, OTP_CONFIG.LENGTH - 1)).toString();
 };
 
@@ -223,7 +250,7 @@ export const getOTPStatus = (phoneNumber: string): { exists: boolean; expiresIn?
   };
 };
 
-export const resendOTP = async (phoneNumber: string): Promise<SMSResponse & { code?: string }> => {
+export const resendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
   // Clear existing OTP first
   otpStorage.delete(phoneNumber);
   
@@ -235,10 +262,62 @@ export const clearOTP = (phoneNumber: string): void => {
   otpStorage.delete(phoneNumber);
 };
 
+// Rate limiting functions
+const checkRateLimit = (phoneNumber: string): { allowed: boolean; waitTime?: number } => {
+  const now = Date.now();
+  const hourAgo = now - (60 * 60 * 1000);
+  
+  const rateLimit = rateLimitStorage.get(phoneNumber);
+  
+  if (!rateLimit || rateLimit.resetTime < now) {
+    // Reset rate limit
+    rateLimitStorage.set(phoneNumber, { count: 1, resetTime: now + (60 * 60 * 1000) });
+    return { allowed: true };
+  }
+  
+  if (rateLimit.count >= OTP_CONFIG.MAX_OTPS_PER_HOUR) {
+    const waitTime = Math.ceil((rateLimit.resetTime - now) / (60 * 1000));
+    return { allowed: false, waitTime };
+  }
+  
+  rateLimit.count++;
+  rateLimitStorage.set(phoneNumber, rateLimit);
+  return { allowed: true };
+};
+
+const updateRateLimit = (phoneNumber: string): void => {
+  const now = Date.now();
+  const rateLimit = rateLimitStorage.get(phoneNumber);
+  
+  if (rateLimit) {
+    rateLimit.count++;
+    rateLimitStorage.set(phoneNumber, rateLimit);
+  }
+};
+
 // Phone number validation and formatting
 export const isValidPhoneNumber = (phoneNumber: string): boolean => {
+  if (!phoneNumber || typeof phoneNumber !== 'string') {
+    return false;
+  }
+  
   const cleanPhone = phoneNumber.replace(/\D/g, '');
-  return cleanPhone.length >= 10 && cleanPhone.length <= 15;
+  
+  // Basic validation: 10-15 digits
+  if (cleanPhone.length < 10 || cleanPhone.length > 15) {
+    return false;
+  }
+  
+  // Additional validation for Indian numbers
+  if (cleanPhone.startsWith('91') && cleanPhone.length === 12) {
+    return true;
+  }
+  
+  if (cleanPhone.length === 10) {
+    return true;
+  }
+  
+  return false;
 };
 
 export const formatPhoneNumber = (phoneNumber: string): string => {
@@ -308,10 +387,10 @@ export const sendSMS = async (phoneNumber: string, message: string): Promise<SMS
   }
 };
 
-export const sendPasswordResetOTP = async (phoneNumber: string): Promise<SMSResponse & { code?: string }> => {
+export const sendPasswordResetOTP = async (phoneNumber: string): Promise<SMSResponse> => {
   return sendOTP(phoneNumber);
 };
 
-export const send2FACode = async (phoneNumber: string): Promise<SMSResponse & { code?: string }> => {
+export const send2FACode = async (phoneNumber: string): Promise<SMSResponse> => {
   return sendOTP(phoneNumber);
 };

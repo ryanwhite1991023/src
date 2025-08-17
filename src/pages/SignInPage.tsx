@@ -40,7 +40,7 @@ const SignInPage = () => {
         setLoading(true);
         try {
           const result = await sendOTP(existingUser.phone);
-          if (result.success && result.code) {
+          if (result.success) {
             setUserToLogin(existingUser);
             setShowOTPVerification(true);
             

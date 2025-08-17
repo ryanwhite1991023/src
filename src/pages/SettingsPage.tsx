@@ -1,9 +1,25 @@
 import React, { useState } from 'react';
-import { User, Building, CreditCard, Bell, Shield, Save, Edit, Lock, Smartphone, Trash2 } from 'lucide-react';
-import ResponsiveSidebar from '../components/ResponsiveSidebar';
 import { useUser } from '../context/UserContext';
+import { sendOTP, verifyOTP, getOTPStatus } from '../utils/smsApi';
+import { 
+  User, 
+  Building, 
+  Mail, 
+  Phone, 
+  MapPin, 
+  CreditCard, 
+  Shield, 
+  Bell, 
+  Globe, 
+  Palette,
+  Save,
+  Edit,
+  Lock,
+  Smartphone,
+  Trash2
+} from 'lucide-react';
+import ResponsiveSidebar from '../components/ResponsiveSidebar';
 import SubscriptionCard from '../components/SubscriptionCard';
-import { send2FACode } from '../utils/smsApi';
 import { storage } from '../utils/localStorage';
 
 const SettingsPage = () => {
@@ -107,10 +123,10 @@ const SettingsPage = () => {
       }
       
       try {
-        const result = await send2FACode(phoneNumber);
-        if (result.success && result.code) {
-          setSentOTP(result.code);
+        const result = await sendOTP(phoneNumber);
+        if (result.success) {
           setShowOTPInput(true);
+          alert('OTP sent successfully!');
         } else {
           alert('Failed to send verification code. Please try again.');
         }
@@ -135,7 +151,7 @@ const SettingsPage = () => {
     setLoading(true);
     try {
       const result = await sendOTP(formData.phone);
-      if (result.success && result.code) {
+      if (result.success) {
         setShowOTPInput(true);
         
         // Update OTP status
