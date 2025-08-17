@@ -63,8 +63,12 @@ const SignUpPage = () => {
         const status = getOTPStatus(formData.phone);
         setOtpStatus(status);
         
-        // Show success message
-        alert(`OTP sent to ${formData.phone}. Please check your phone.`);
+        // Show success message with development OTP if available
+        let message = `OTP sent to ${formData.phone}. Please check your phone.`;
+        if (result.devOTP) {
+          message += `\n\nDevelopment OTP: ${result.devOTP}`;
+        }
+        alert(message);
         
         // Start resend countdown
         startResendCountdown();

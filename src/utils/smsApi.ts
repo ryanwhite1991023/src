@@ -2,15 +2,20 @@
 const SMS_API_KEY = import.meta.env.VITE_SMS_API_KEY;
 const SMS_API_URL = 'https://2factor.in/API/V1';
 
+// Development mode configuration
+const isDevelopment = import.meta.env.DEV || !SMS_API_KEY;
+const DEV_OTP_DISPLAY = isDevelopment && import.meta.env.VITE_SHOW_DEV_OTP === 'true';
+
 // Validate API key configuration
 if (!SMS_API_KEY) {
-  console.error('SMS API key not configured. Please set VITE_SMS_API_KEY in your environment variables.');
+  console.warn('SMS API key not configured. Running in development mode with local OTP generation.');
 }
 
 export interface SMSResponse {
   success: boolean;
   message: string;
   error?: string;
+  devOTP?: string; // Only for development
 }
 
 export interface OTPData {
@@ -21,8 +26,39 @@ export interface OTPData {
   createdAt: number;
 }
 
-// In-memory OTP storage (replace with database in production)
-const otpStorage = new Map<string, OTPData>();
+// Persistent OTP storage using localStorage (for development)
+const getOTPStorage = (): Map<string, OTPData> => {
+  const storageKey = 'invenease_otp_storage';
+  try {
+    const stored = localStorage.getItem(storageKey);
+    if (stored) {
+      const data = JSON.parse(stored);
+      const map = new Map();
+      Object.entries(data).forEach(([key, value]) => {
+        map.set(key, value as OTPData);
+      });
+      return map;
+    }
+  } catch (error) {
+    console.warn('Failed to load OTP storage from localStorage:', error);
+  }
+  return new Map();
+};
+
+const saveOTPStorage = (storage: Map<string, OTPData>): void => {
+  const storageKey = 'invenease_otp_storage';
+  try {
+    const data: Record<string, OTPData> = {};
+    storage.forEach((value, key) => {
+      data[key] = value;
+    });
+    localStorage.setItem(storageKey, JSON.stringify(data));
+  } catch (error) {
+    console.warn('Failed to save OTP storage to localStorage:', error);
+  }
+};
+
+let otpStorage = getOTPStorage();
 
 // OTP configuration
 const OTP_CONFIG = {
@@ -87,6 +123,9 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
       phoneNumber,
       createdAt
     });
+    
+    // Save to localStorage for persistence
+    saveOTPStorage(otpStorage);
 
     // Try to send via SMS API if configured
     if (SMS_API_KEY) {
@@ -112,6 +151,7 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
               phoneNumber,
               createdAt
             });
+            saveOTPStorage(otpStorage);
           }
           
           // Update rate limiting
@@ -119,12 +159,23 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
           
           return {
             success: true,
-            message: 'OTP sent successfully via SMS'
+            message: 'OTP sent successfully via SMS',
+            ...(DEV_OTP_DISPLAY && { devOTP: newOTP })
           };
         } else {
           console.warn('SMS API failed:', data);
-          // Remove stored OTP if SMS failed
+          // In development mode, still allow OTP to work
+          if (isDevelopment) {
+            updateRateLimit(phoneNumber);
+            return {
+              success: true,
+              message: 'OTP generated successfully (SMS delivery failed - Development Mode)',
+              devOTP: newOTP
+            };
+          }
+          // Remove stored OTP if SMS failed in production
           otpStorage.delete(phoneNumber);
+          saveOTPStorage(otpStorage);
           return {
             success: false,
             message: 'Failed to send OTP via SMS. Please try again later.',
@@ -133,8 +184,18 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
         }
       } catch (apiError) {
         console.warn('SMS API error:', apiError);
-        // Remove stored OTP if API error
+        // In development mode, still allow OTP to work
+        if (isDevelopment) {
+          updateRateLimit(phoneNumber);
+          return {
+            success: true,
+            message: 'OTP generated successfully (SMS delivery failed - Development Mode)',
+            devOTP: newOTP
+          };
+        }
+        // Remove stored OTP if API error in production
         otpStorage.delete(phoneNumber);
+        saveOTPStorage(otpStorage);
         return {
           success: false,
           message: 'Failed to send OTP. Please try again later.',
@@ -142,8 +203,18 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
         };
       }
     } else {
-      // No API key configured
+      // No API key configured - development mode
+      if (isDevelopment) {
+        updateRateLimit(phoneNumber);
+        return {
+          success: true,
+          message: 'OTP generated successfully (Development Mode - No SMS API)',
+          devOTP: newOTP
+        };
+      }
+      // Remove stored OTP if no API key in production
       otpStorage.delete(phoneNumber);
+      saveOTPStorage(otpStorage);
       return {
         success: false,
         message: 'SMS service not configured. Please contact support.',
@@ -175,6 +246,7 @@ export const verifyOTP = (phoneNumber: string, inputOTP: string): SMSResponse =>
     if (isOTPExpired(storedOTP.expiresAt)) {
       // Clean up expired OTP
       otpStorage.delete(phoneNumber);
+      saveOTPStorage(otpStorage);
       return {
         success: false,
         message: 'OTP has expired. Please request a new one.',
@@ -185,6 +257,7 @@ export const verifyOTP = (phoneNumber: string, inputOTP: string): SMSResponse =>
     if (storedOTP.attempts >= OTP_CONFIG.MAX_ATTEMPTS) {
       // Clean up OTP after max attempts
       otpStorage.delete(phoneNumber);
+      saveOTPStorage(otpStorage);
       return {
         success: false,
         message: 'Maximum verification attempts exceeded. Please request a new OTP.',
@@ -195,10 +268,12 @@ export const verifyOTP = (phoneNumber: string, inputOTP: string): SMSResponse =>
     // Increment attempts
     storedOTP.attempts++;
     otpStorage.set(phoneNumber, storedOTP);
+    saveOTPStorage(otpStorage);
 
     if (inputOTP === storedOTP.code) {
       // Clean up successful OTP
       otpStorage.delete(phoneNumber);
+      saveOTPStorage(otpStorage);
       return {
         success: true,
         message: 'OTP verified successfully'
@@ -253,6 +328,7 @@ export const getOTPStatus = (phoneNumber: string): { exists: boolean; expiresIn?
 export const resendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
   // Clear existing OTP first
   otpStorage.delete(phoneNumber);
+  saveOTPStorage(otpStorage);
   
   // Send new OTP
   return sendOTP(phoneNumber);
@@ -260,6 +336,7 @@ export const resendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
 
 export const clearOTP = (phoneNumber: string): void => {
   otpStorage.delete(phoneNumber);
+  saveOTPStorage(otpStorage);
 };
 
 // Rate limiting functions

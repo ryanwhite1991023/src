@@ -63,6 +63,10 @@ export class LocalStorageManager {
     this.setItem('invenease_users', users);
   }
 
+  saveUsersList(users: any[]): void {
+    this.setItem('invenease_users', users);
+  }
+
   getUser(): any | null {
     return this.getItem('invenease_user', null);
   }

@@ -158,7 +158,12 @@ const SettingsPage = () => {
         const status = getOTPStatus(formData.phone);
         setOtpStatus(status);
         
-        alert('OTP sent successfully. Please check your phone.');
+        // Show success message with development OTP if available
+        let message = 'OTP sent successfully. Please check your phone.';
+        if (result.devOTP) {
+          message += `\n\nDevelopment OTP: ${result.devOTP}`;
+        }
+        alert(message);
       } else {
         alert(result.message || 'Failed to send OTP. Please try again.');
       }
