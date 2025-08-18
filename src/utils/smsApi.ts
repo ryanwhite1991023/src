@@ -2,14 +2,50 @@
 const SMS_API_KEY = import.meta.env.VITE_SMS_API_KEY;
 const SMS_API_URL = 'https://2factor.in/API/V1';
 
-// Development mode configuration
-const isDevelopment = import.meta.env.DEV || !SMS_API_KEY;
+// Proper environment detection
+const isDevelopment = import.meta.env.DEV === true;
+const isProduction = import.meta.env.PROD === true;
+const hasSMSAPI = !!SMS_API_KEY;
+
+// Development mode configuration - only show dev OTP in actual development
 const DEV_OTP_DISPLAY = isDevelopment && import.meta.env.VITE_SHOW_DEV_OTP === 'true';
 
 // Validate API key configuration
 if (!SMS_API_KEY) {
-  console.warn('SMS API key not configured. Running in development mode with local OTP generation.');
+  if (isProduction) {
+    console.error('SMS API key not configured in production. OTP system will not work.');
+  } else {
+    console.warn('SMS API key not configured. Running in development mode with local OTP generation.');
+  }
 }
+
+// Production environment validation
+export const isProductionEnvironment = (): boolean => {
+  return isProduction;
+};
+
+export const hasSMSAPIConfigured = (): boolean => {
+  return hasSMSAPI;
+};
+
+// Check if system is production-ready
+export const isProductionReady = (): boolean => {
+  if (isProduction && !hasSMSAPI) {
+    return false;
+  }
+  return true;
+};
+
+// Get system status for debugging
+export const getSystemStatus = () => {
+  return {
+    isDevelopment,
+    isProduction,
+    hasSMSAPI,
+    isProductionReady: isProductionReady(),
+    devOTPDisplay: DEV_OTP_DISPLAY
+  };
+};
 
 export interface SMSResponse {
   success: boolean;
@@ -164,7 +200,11 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
           };
         } else {
           console.warn('SMS API failed:', data);
-          // In development mode, still allow OTP to work
+          // Remove stored OTP if SMS failed
+          otpStorage.delete(phoneNumber);
+          saveOTPStorage(otpStorage);
+          
+          // In development mode, show the OTP for testing
           if (isDevelopment) {
             updateRateLimit(phoneNumber);
             return {
@@ -173,9 +213,8 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
               devOTP: newOTP
             };
           }
-          // Remove stored OTP if SMS failed in production
-          otpStorage.delete(phoneNumber);
-          saveOTPStorage(otpStorage);
+          
+          // In production, fail securely without exposing OTP
           return {
             success: false,
             message: 'Failed to send OTP via SMS. Please try again later.',
@@ -184,7 +223,11 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
         }
       } catch (apiError) {
         console.warn('SMS API error:', apiError);
-        // In development mode, still allow OTP to work
+        // Remove stored OTP if API error
+        otpStorage.delete(phoneNumber);
+        saveOTPStorage(otpStorage);
+        
+        // In development mode, show the OTP for testing
         if (isDevelopment) {
           updateRateLimit(phoneNumber);
           return {
@@ -193,9 +236,8 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
             devOTP: newOTP
           };
         }
-        // Remove stored OTP if API error in production
-        otpStorage.delete(phoneNumber);
-        saveOTPStorage(otpStorage);
+        
+        // In production, fail securely without exposing OTP
         return {
           success: false,
           message: 'Failed to send OTP. Please try again later.',
@@ -203,7 +245,12 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
         };
       }
     } else {
-      // No API key configured - development mode
+      // No API key configured
+      // Remove stored OTP since we can't send SMS
+      otpStorage.delete(phoneNumber);
+      saveOTPStorage(otpStorage);
+      
+      // In development mode, allow OTP generation for testing
       if (isDevelopment) {
         updateRateLimit(phoneNumber);
         return {
@@ -212,9 +259,8 @@ export const sendOTP = async (phoneNumber: string): Promise<SMSResponse> => {
           devOTP: newOTP
         };
       }
-      // Remove stored OTP if no API key in production
-      otpStorage.delete(phoneNumber);
-      saveOTPStorage(otpStorage);
+      
+      // In production, fail securely without SMS service
       return {
         success: false,
         message: 'SMS service not configured. Please contact support.',
